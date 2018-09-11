@@ -3,9 +3,9 @@ package checker
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -17,6 +17,10 @@ const (
 	readOnlyComment     = "readonly"
 	overwritableComment = "overwritable"
 	overwriteComment    = "overwrite"
+
+	defaultFormat           = "overwrite package variables: %s"
+	readOnlyCommentedFormat = "overwrite readonly package variables: %s"
+	allowedOverwriteFormat  = ""
 )
 
 type inspector func(ast.Node) ast.Visitor
@@ -25,80 +29,103 @@ func (f inspector) Visit(node ast.Node) ast.Visitor {
 	return f(node)
 }
 
-// Check checks package variables are overwrited.
-func Check(path string) error {
-	fset := token.NewFileSet() // positions are relative to fset
-	f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-	if err != nil {
-		return errors.Wrapf(err, "failed to parse %s", path)
-	}
-
-	cmap := ast.NewCommentMap(fset, f, f.Comments)
-	ast.Inspect(f, func(node ast.Node) bool {
-		switch n := node.(type) {
-		case *ast.AssignStmt:
-			msgs, err := check(n, cmap, f.Imports)
-			if err != nil {
-				fmt.Println(err)
-				return false
-			}
-			if len(msgs) > 0 {
-				for i := range msgs {
-					pos := fset.Position(n.Pos())
-					fmt.Fprintln(os.Stdout, pos.Filename, pos.Line, msgs[i])
-				}
-			}
-		}
-		return true
-	})
-	return nil
+// Message contains information about overwrited variables
+type Message struct {
+	Path  string
+	Line  int
+	Texts []string
 }
 
-func check(stmt *ast.AssignStmt, cmap ast.CommentMap, imports []*ast.ImportSpec) ([]string, error) {
-	var messages []string
+func CheckPkg(pkg *build.Package) ([]Message, error) {
+	var messages []Message
+	absPath, err := filepath.Abs(pkg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	pkgPath := strings.TrimPrefix(absPath, filepath.Join(build.Default.GOPATH, "src")+string(filepath.Separator))
+	for _, f := range pkg.GoFiles {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, filepath.Join(absPath, f), nil, parser.ParseComments)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to parse %s", f)
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.AssignStmt:
+				msgs, err := checkAssign(fset, n, file, pkgPath)
+				if err != nil {
+					return false
+				}
+				pos := fset.Position(n.Pos())
+				messages = append(messages, Message{Path: filepath.Join(pkgPath, f), Line: pos.Line, Texts: msgs})
+			}
+			return true
+		})
+	}
+	return messages, nil
+}
+
+func checkAssign(fset *token.FileSet, stmt *ast.AssignStmt, f *ast.File, selfImportPath string) ([]string, error) {
+	var msgs []string
+	cmap := ast.NewCommentMap(fset, f, f.Comments)
 	for _, assignee := range stmt.Lhs {
+		pkgPath := selfImportPath
+		varName := ""
 		switch val := assignee.(type) {
 		case *ast.SelectorExpr:
-			for _, impt := range imports {
+			varName = val.Sel.Name
+			for _, impt := range f.Imports {
 				pkgName := val.X.(*ast.Ident).Name
-				pkgPath := strings.Trim(impt.Path.Value, "\"")
+				pkgPath = strings.Trim(impt.Path.Value, "\"")
 				imptName := filepath.Base(pkgPath)
 				if impt.Name != nil {
 					imptName = impt.Name.Name
 				}
 				if imptName == pkgName {
-					comments, err := picker.GetComment(pkgPath, val.Sel.Name)
-					if err != nil {
-						return nil, errors.Wrap(err, "failed to get comment")
-					}
-					if msg := checkComment(comments, cmap[stmt]); msg != "" {
-						messages = append(messages, fmt.Sprintf("%s %s.%s", msg, imptName, val.Sel.Name))
-					}
+					break
 				}
 			}
 		case *ast.Ident:
-			// 自分のインポートパスを取得してやっていく
+			varName = val.Name
+		}
+		comments, err := picker.GetComment(pkgPath, varName)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get comment")
+		}
+		if msg := checkComment(comments, cmap[stmt]); msg != allowedOverwriteFormat {
+			pkgName := ""
+			if pkgPath != selfImportPath {
+				pkgName = pkgPath + "."
+			}
+			msgs = append(msgs, fmt.Sprintf(msg, pkgName+varName))
 		}
 	}
-	return messages, nil
+	return msgs, nil
 }
 
-func checkComment(baseComment, usedComment []*ast.CommentGroup) string {
-	for _, bc := range baseComment {
-		for _, t := range bc.List {
+func checkComment(baseCommentGroup, destCommentGroup []*ast.CommentGroup) string {
+	isReadonly := true
+	for _, comments := range baseCommentGroup {
+		for _, t := range comments.List {
+			// ここに来るってことはすでに書き換えているので、readonly があれば問答無用で警告を出す
 			if strings.Contains(t.Text, readOnlyComment) {
-				return "you overwrites read only package variables"
+				return readOnlyCommentedFormat
 			}
 			if strings.Contains(t.Text, overwritableComment) {
-				for _, assignComment := range usedComment {
-					for _, ac := range assignComment.List {
-						if strings.Contains(ac.Text, overwriteComment) {
-							return ""
-						}
-					}
-				}
+				isReadonly = false
 			}
 		}
 	}
-	return "you overwrite package variables"
+	// デフォルトは readonly の挙動にする
+	if isReadonly {
+		return defaultFormat
+	}
+	for _, assignComment := range destCommentGroup {
+		for _, ac := range assignComment.List {
+			if strings.Contains(ac.Text, overwriteComment) {
+				return allowedOverwriteFormat
+			}
+		}
+	}
+	return defaultFormat
 }

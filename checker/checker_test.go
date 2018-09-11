@@ -2,11 +2,14 @@ package checker
 
 import (
 	"testing"
+
+	"github.com/k0kubun/pp"
 )
 
 func TestCheck(t *testing.T) {
-	err := Check("testdata.go")
+	msgs, err := Check("testdata.go")
 	if err != nil {
 		t.Error(err)
 	}
+	pp.Println(msgs)
 }
