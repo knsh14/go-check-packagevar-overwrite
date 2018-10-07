@@ -14,12 +14,16 @@ var (
 )
 
 func Hoge() {
+	var hello int
 	Foo = 100
+
+	hello = 10
 
 	// overwrite
 	Bar = "See You." // foo bar
 
 	bufio.ErrBufferFull = fmt.Errorf("bufio: buffer full kamata")
+	fmt.Println(hello)
 
 	e := errors.New("error is error")
 	fmt.Println(e)

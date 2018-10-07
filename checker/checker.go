@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/knsh14/go-check-overwrites/picker"
+	"github.com/knsh14/go-check-packagevar-overwrite/picker"
 	"github.com/pkg/errors"
 )
 
@@ -34,6 +34,33 @@ type Message struct {
 	Path  string
 	Line  int
 	Texts []string
+}
+
+func CheckDir(dir string) ([]Message, error) {
+	var messages []Message
+	fset := token.NewFileSet()
+	pkgMap, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse dir %s", dir)
+	}
+	pkgPath := strings.TrimPrefix(dir, filepath.Join(build.Default.GOPATH, "src")+string(filepath.Separator))
+	for _, pkg := range pkgMap {
+		for filename, file := range pkg.Files {
+			ast.Inspect(file, func(node ast.Node) bool {
+				switch n := node.(type) {
+				case *ast.AssignStmt:
+					msgs, err := checkAssign(fset, n, file, pkgPath)
+					if err != nil {
+						return false
+					}
+					pos := fset.Position(n.Pos())
+					messages = append(messages, Message{Path: filepath.Join(pkgPath, filename), Line: pos.Line, Texts: msgs})
+				}
+				return true
+			})
+		}
+	}
+	return messages, nil
 }
 
 func CheckPkg(pkg *build.Package) ([]Message, error) {

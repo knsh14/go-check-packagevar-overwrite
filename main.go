@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/knsh14/go-check-overwrites/checker"
+	"github.com/knsh14/go-check-packagevar-overwrite/checker"
 )
 
 func main() {
